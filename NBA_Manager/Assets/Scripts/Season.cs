@@ -41,16 +41,22 @@ namespace NBAManager
         public bool isPlayed;
         public bool isPlayerGame;      // true if the human team is involved
 
+        // Back-to-back flags — set during schedule generation
+        public bool homeTeamOnB2B;     // home team played yesterday
+        public bool awayTeamOnB2B;     // away team played yesterday
+
         public ScheduledGame(Team home, Team away, int week, int day)
         {
-            gameId      = Guid.NewGuid().ToString();
-            homeTeam    = home;
-            awayTeam    = away;
-            this.week   = week;
+            gameId           = Guid.NewGuid().ToString();
+            homeTeam         = home;
+            awayTeam         = away;
+            this.week        = week;
             this.dayOfSeason = day;
-            isPlayed    = false;
-            isPlayIn    = false;
-            isPlayoff   = false;
+            isPlayed         = false;
+            isPlayIn         = false;
+            isPlayoff        = false;
+            homeTeamOnB2B    = false;
+            awayTeamOnB2B    = false;
         }
     }
 
@@ -316,60 +322,140 @@ namespace NBAManager
 
         // Generates a balanced 82-game schedule for all 30 teams.
         // Each team plays:
-        //   - 4 games vs each division opponent      (4 × 4 = 16)
-        //   - 4 games vs most same-conference teams  (~36)
-        //   - 2 games vs all opposite-conference     (2 × 15 = 30)
+        //   - 4 games vs each division opponent      (4 × 4  = 16)
+        //   - 3 games vs rest of same conference     (~36)
+        //   - 2 games vs all opposite conference     (2 × 15 = 30)
         // Total = 82
+        //
+        // Game days are variable — some nights have 2 games, some have 13,
+        // mirroring the real NBA calendar. Back-to-backs are tracked per team.
         public void GenerateRegularSeasonSchedule()
         {
             regularSeasonSchedule.Clear();
-            var matchups = new List<(Team, Team)>();
+            var matchups = new List<(Team home, Team away)>();
 
+            // Build matchup pool — each pair added once, home/away determined later
+            var pairs = new HashSet<string>();
             foreach (var team in allTeams)
             {
-                var division     = allTeams.Where(t => t != team && t.division == team.division);
-                var sameConf     = allTeams.Where(t => t != team && t.conference == team.conference && t.division != team.division);
-                var otherConf    = allTeams.Where(t => t.conference != team.conference);
+                var division  = allTeams.Where(t => t != team && t.division   == team.division);
+                var sameConf  = allTeams.Where(t => t != team && t.conference == team.conference && t.division != team.division);
+                var otherConf = allTeams.Where(t => t.conference != team.conference);
 
-                // 4 games vs division (home+away balanced by schedule)
                 foreach (var opp in division)
-                    if (!matchups.Any(m => (m.Item1 == team && m.Item2 == opp) || (m.Item1 == opp && m.Item2 == team)))
-                        for (int i = 0; i < 4; i++) matchups.Add((team, opp));
+                {
+                    string key = string.Compare(team.teamId, opp.teamId) < 0
+                        ? $"{team.teamId}_{opp.teamId}" : $"{opp.teamId}_{team.teamId}";
+                    if (pairs.Add(key))
+                        for (int i = 0; i < 4; i++)
+                            matchups.Add(i % 2 == 0 ? (team, opp) : (opp, team));
+                }
 
-                // ~36 games vs rest of conference (mix of 3 and 4 per opponent)
                 foreach (var opp in sameConf)
-                    if (!matchups.Any(m => (m.Item1 == team && m.Item2 == opp) || (m.Item1 == opp && m.Item2 == team)))
-                        for (int i = 0; i < 3; i++) matchups.Add((team, opp));
+                {
+                    string key = string.Compare(team.teamId, opp.teamId) < 0
+                        ? $"{team.teamId}_{opp.teamId}" : $"{opp.teamId}_{team.teamId}";
+                    if (pairs.Add(key))
+                        for (int i = 0; i < 3; i++)
+                            matchups.Add(i % 2 == 0 ? (team, opp) : (opp, team));
+                }
 
-                // 2 games vs all opposite conference
                 foreach (var opp in otherConf)
-                    if (!matchups.Any(m => (m.Item1 == team && m.Item2 == opp) || (m.Item1 == opp && m.Item2 == team)))
-                        for (int i = 0; i < 2; i++) matchups.Add((team, opp));
+                {
+                    string key = string.Compare(team.teamId, opp.teamId) < 0
+                        ? $"{team.teamId}_{opp.teamId}" : $"{opp.teamId}_{team.teamId}";
+                    if (pairs.Add(key))
+                        for (int i = 0; i < 2; i++)
+                            matchups.Add(i % 2 == 0 ? (team, opp) : (opp, team));
+                }
             }
 
-            // Shuffle and assign to weeks/days
+            // Shuffle matchups
             matchups = matchups.OrderBy(_ => UnityEngine.Random.value).ToList();
 
-            int day = 1;
-            int week = 1;
-            int gamesPerDay = 15; // ~15 games per day like real NBA
+            // ── Variable game day distribution ────────────────────────────────
+            // Real NBA nights have anywhere from 1 to 13 games.
+            // We use a weighted random pattern:
+            //   ~30% of days:  2–4  games  (quiet nights)
+            //   ~45% of days:  5–8  games  (standard nights)
+            //   ~20% of days:  9–11 games  (busy nights)
+            //   ~5%  of days: 12–15 games  (big nights — Christmas, MLK etc.)
 
-            for (int i = 0; i < matchups.Count; i++)
+            var dayGameCounts = new List<int>(); // how many games each day will hold
+            int remaining = matchups.Count;
+
+            while (remaining > 0)
             {
-                var (home, away) = matchups[i];
-                var game = new ScheduledGame(home, away, week, day);
+                float roll = UnityEngine.Random.value;
+                int count;
 
-                // Tag if the player's team is involved
-                game.isPlayerGame = allTeams.Any(t => t.isPlayerTeam &&
-                    (t == home || t == away));
+                if (roll < 0.30f)      count = UnityEngine.Random.Range(2, 5);   // 2–4
+                else if (roll < 0.75f) count = UnityEngine.Random.Range(5, 9);   // 5–8
+                else if (roll < 0.95f) count = UnityEngine.Random.Range(9, 12);  // 9–11
+                else                   count = UnityEngine.Random.Range(12, 16); // 12–15
 
-                regularSeasonSchedule.Add(game);
-
-                if ((i + 1) % gamesPerDay == 0) { day++; week = Mathf.CeilToInt(day / 3.5f); }
+                count = Mathf.Min(count, remaining);
+                dayGameCounts.Add(count);
+                remaining -= count;
             }
 
+            // ── Assign games to days and tag back-to-backs ────────────────────
+            // lastGameDay[team] = last day that team played — used for B2B detection
+            var lastGameDay = new Dictionary<Team, int>();
+
+            int matchupIndex = 0;
+            int day          = 1;
+
+            foreach (int gamesThisDay in dayGameCounts)
+            {
+                int week = Mathf.CeilToInt(day / 7f);
+
+                for (int g = 0; g < gamesThisDay; g++)
+                {
+                    var (home, away) = matchups[matchupIndex++];
+                    var game         = new ScheduledGame(home, away, week, day);
+
+                    // Back-to-back: did this team play yesterday?
+                    game.homeTeamOnB2B = lastGameDay.TryGetValue(home, out int hLast) && hLast == day - 1;
+                    game.awayTeamOnB2B = lastGameDay.TryGetValue(away, out int aLast) && aLast == day - 1;
+
+                    // Tag player team involvement
+                    game.isPlayerGame = home.isPlayerTeam || away.isPlayerTeam;
+
+                    regularSeasonSchedule.Add(game);
+
+                    lastGameDay[home] = day;
+                    lastGameDay[away] = day;
+                }
+
+                day++;
+
+                // Occasional rest day (no games) — ~1 in every 8 days
+                if (UnityEngine.Random.value < 0.12f && remaining > 0)
+                    day++;
+            }
+
+            currentWeek = 1;
             InitialiseStandings();
         }
+
+        // Returns all games on a specific day of the season
+        public List<ScheduledGame> GetGamesOnDay(int day) =>
+            regularSeasonSchedule.Where(g => g.dayOfSeason == day).ToList();
+
+        // Returns the next unplayed day number in the schedule
+        public int NextScheduledDay =>
+            regularSeasonSchedule
+                .Where(g => !g.isPlayed)
+                .Select(g => g.dayOfSeason)
+                .DefaultIfEmpty(0)
+                .Min();
+
+        // Returns how many back-to-backs a team has this season (useful for UI)
+        public int GetBackToBackCount(Team team) =>
+            regularSeasonSchedule.Count(g =>
+                (g.homeTeam == team && g.homeTeamOnB2B) ||
+                (g.awayTeam == team && g.awayTeamOnB2B));
 
         // ── Standings ─────────────────────────────────────────────────────────
 
