@@ -10,7 +10,7 @@ namespace NBAManager
     //   1. MainMenuPanel     — title screen with New Game / Continue / Quit
     //   2. SaveSlotPanel     — slot picker (reused for both new and continue)
     //   3. NewGameSetupPanel — team selection before generating the league
-
+    
     public class MenuUIManager : MonoBehaviour
     {
         // ── Panel references ──────────────────────────────────────────────────
@@ -60,7 +60,10 @@ namespace NBAManager
 
         private void Start()
         {
+
+            Debug.Log("Test Start");
             // Wire main menu buttons
+            //newGameButton.onClick.AddListener(() => Debug.Log("BUTTON CLICKED"));
             newGameButton.onClick.AddListener(OnNewGameClicked);
             continueButton.onClick.AddListener(OnContinueClicked);
             quitButton.onClick.AddListener(OnQuitClicked);
@@ -89,10 +92,11 @@ namespace NBAManager
 
         private void OnNewGameClicked()
         {
+            Debug.Log("New Game clicked");
             _isNewGame = true;
             slotPanelTitle.text = "Choose a Save Slot";
             RefreshSlotUIs(showEmpty: true);
-            ShowPanel(saveSlotPanel);
+            ShowPanel(newGameSetupPanel);
         }
 
         private void OnContinueClicked()
@@ -105,11 +109,11 @@ namespace NBAManager
 
         private void OnQuitClicked()
         {
-#if UNITY_EDITOR
-            UnityEditor.EditorApplication.isPlaying = false;
-#else
-            Application.Quit();
-#endif
+            #if UNITY_EDITOR
+                        UnityEditor.EditorApplication.isPlaying = false;
+            #else
+                        Application.Quit();
+            #endif
         }
 
         // ── Save slot panel ───────────────────────────────────────────────────
